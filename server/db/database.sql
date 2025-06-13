@@ -1,6 +1,6 @@
-CREATE DATABASE note-web;
+CREATE DATABASE noteweb;
 
-\c note-web;
+\c noteweb;
 
 CREATE TABLE notes (
   note_id SERIAL PRIMARY KEY,
