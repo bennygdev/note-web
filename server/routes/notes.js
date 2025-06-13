@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { pool } = require('../db/db');
+const { Note } = require('../models');
 const {
   S3Client,
   PutObjectCommand,
@@ -9,12 +9,10 @@ const {
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const crypto = require('crypto');
-
 require("dotenv").config();
 
 // Generate a random image name
-const randomImageName = (bytes = 16) =>
-  crypto.randomBytes(bytes).toString('hex');
+const randomImageName = (bytes = 16) => crypto.randomBytes(bytes).toString('hex');
 
 // S3 Client Configuration
 const s3Client = new S3Client({
@@ -43,23 +41,21 @@ router.get('/upload-url', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try { 
-    const { rows } = await pool.query(
-      'SELECT * FROM notes ORDER BY created_at DESC'
-    );
+    const notes = await Note.findAll({ order: [['created_at', 'DESC']] });
 
     // Generate signed URL
-    for (const note of rows) {
+    for (const note of notes) {
       if (note.image_url) {
         const command = new GetObjectCommand({
           Bucket: process.env.AWS_S3_BUCKET_NAME,
           Key: note.image_url,
         });
         // The URL will be valid for 1 hour (3600 seconds)
-        note.image_display_url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        note.setDataValue('image_display_url', await getSignedUrl(s3Client, command, { expiresIn: 3600 }));
       }
     }
 
-    res.json(rows);
+    res.json(notes);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
@@ -67,18 +63,11 @@ router.get('/', async (req, res) => {
 });
 
 router.get('/:id', async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const { rows } = await pool.query(
-      'SELECT * FROM notes WHERE note_id = $1',
-      [id]
-    );
-    if (rows.length === 0) {
+    const note = await Note.findByPk(req.params.id);
+    if (!note) {
       return res.status(404).json({ msg: 'Note not found' });
     }
-
-    const note = rows[0];
 
     // Generate signed URL if note has image
     if (note.image_url) {
@@ -86,10 +75,10 @@ router.get('/:id', async (req, res) => {
         Bucket: process.env.AWS_S3_BUCKET_NAME,
         Key: note.image_url,
       });
-      note.image_display_url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+      note.setDataValue('image_display_url', await getSignedUrl(s3Client, command, { expiresIn: 3600 }));
     }
 
-    res.json(rows[0]);
+    res.json(note);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
@@ -97,14 +86,10 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { title, content, image_url } = req.body;
-
   try {
-    const { rows } = await pool.query(
-      'INSERT INTO notes (title, content, image_url) VALUES ($1, $2, $3) RETURNING *',
-      [title, content, image_url]
-    );
-    res.status(201).json(rows[0]);
+    const { title, content, image_url } = req.body;
+    const newNote = await Note.create({ title, content, image_url });
+    res.status(201).json(newNote);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
@@ -112,30 +97,19 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { title, content, image_url: new_image_url } = req.body;
-
   try {
-    // Get current image url before updating
-    let oldImageUrl = null;
-    const currentNoteResult = await pool.query(
-      'SELECT image_url FROM notes WHERE note_id = $1',
-      [id]
-    );
+    const { title, content, image_url: new_image_url } = req.body;
+    const note = await Note.findByPk(req.params.id);
 
-    if (currentNoteResult.rows.length > 0) {
-      oldImageUrl = currentNoteResult.rows[0].image_url;
-    }
-
-    // Update note in database
-    const { rows } = await pool.query(
-      'UPDATE notes SET title = $1, content = $2, image_url = $3, updated_at = NOW() WHERE note_id = $4 RETURNING *',
-      [title, content, new_image_url, id]
-    );
-
-    if (rows.length === 0) {
+    if (!note) {
       return res.status(404).json({ msg: 'Note not found' });
     }
+
+    // Get current image url before updating
+    const oldImageUrl = note.image_url;
+    
+    // Update the note in the database
+    await note.update({ title, content, image_url: new_image_url });
 
     // If image is replaced, delete old image from S3
     if (oldImageUrl && oldImageUrl !== new_image_url) {
@@ -143,16 +117,11 @@ router.put('/:id', async (req, res) => {
         Bucket: process.env.AWS_S3_BUCKET_NAME,
         Key: oldImageUrl,
       };
-
-      try {
-        await s3Client.send(new DeleteObjectCommand(deleteParams));
-        console.log(`Successfully deleted old image ${oldImageUrl} from S3.`);
-      } catch (s3Error) {
-        console.error(`Error deleting old image from S3: ${oldImageUrl}`, s3Error);
-      }
+      await s3Client.send(new DeleteObjectCommand(deleteParams));
+      console.log(`Successfully deleted old image ${oldImageUrl} from S3.`);
     }
 
-    res.json(rows[0]);
+    res.json(note);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
@@ -160,32 +129,26 @@ router.put('/:id', async (req, res) => {
 });
 
 router.delete('/:id', async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const result = await pool.query(
-      'DELETE FROM notes WHERE note_id = $1 RETURNING *',
-      [id]
-    );
+    const note = await Note.findByPk(req.params.id);
 
-    if (result.rowCount === 0) {
+    if (!note) {
       return res.status(404).json({ msg: 'Note not found' });
     }
 
-    // Delete image in s3 bucket
-    const deletedNote = result.rows[0];
-    if (deletedNote.image_url) {
+    const imageUrlToDelete = note.image_url;
+
+    // Delete note from database
+    await note.destroy();
+
+    // Delete image from S3 bucket
+    if (imageUrlToDelete) {
       const deleteParams = {
         Bucket: process.env.AWS_S3_BUCKET_NAME,
-        Key: deletedNote.image_url,
+        Key: imageUrlToDelete,
       };
-
-      try {
-        await s3Client.send(new DeleteObjectCommand(deleteParams));
-        console.log(`Successfully deleted image ${deletedNote.image_url} from S3.`);
-      } catch (s3Error) {
-        console.error(`Error deleting image from S3: ${deletedNote.image_url}`, s3Error);
-      }
+      await s3Client.send(new DeleteObjectCommand(deleteParams));
+      console.log(`Successfully deleted image ${imageUrlToDelete} from S3.`);
     }
 
     res.json({ msg: 'Note deleted' });
