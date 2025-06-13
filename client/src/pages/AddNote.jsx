@@ -12,34 +12,17 @@ function AddNote() {
     e.preventDefault();
     setUploading(true);
 
-    let imageUrl = null;
+    const formData = new FormData();
+    formData.append('title', title);
+    formData.append('content', content);
     if (image) {
-      try {
-        // Get pre-signed URL from server
-        const res = await fetch('http://localhost:8080/api/notes/upload-url');
-        const { uploadUrl, key } = await res.json();
-
-        // Upload image to S3
-        await fetch(uploadUrl, {
-          method: 'PUT',
-          body: image,
-          headers: { 'Content-Type': image.type },
-        });
-        imageUrl = key;
-      } catch (error) {
-        console.error('Failed to upload image:', error);
-        alert('Failed to upload image. Please try again.');
-        setUploading(false);
-        return;
-      }
+      formData.append('image', image);
     }
 
-    // Save note to database
     try {
       await fetch('http://localhost:8080/api/notes', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, content, image_url: imageUrl }),
+        body: formData,
       });
       if (navigate) navigate('/');
     } catch (error) {
@@ -55,6 +38,7 @@ function AddNote() {
       <h1 className="text-4xl font-bold mb-8 text-gray-800">Add a New Note</h1>
       <form
         onSubmit={handleSubmit}
+        encType="multipart/form-data"
         className="bg-white p-8 rounded-lg shadow-sm border border-gray-200 space-y-6"
       >
         <div>
